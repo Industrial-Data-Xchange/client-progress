@@ -1,0 +1,418 @@
+<!doctype html>
+<!--
+  Read-only client progress page. Published by the IDX Helpdesk
+  (backend/src/services/clientShare.ts) next to an encrypted data.json; the
+  password decrypts it here in the browser (PBKDF2-SHA256 → AES-256-GCM).
+  Self-contained on purpose: no external scripts, fonts or trackers.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Project progress · IDX</title>
+<style>
+  :root {
+    --red: #CF142B; --red-dark: #A81023; --red-light: #F5D0D4;
+    --off-white: #F7F7F8; --dark-grey: #717370; --light-grey: #D1D3D4;
+    --ink: #111; --green: #15803d; --green-bg: #dcfce7; --amber: #b45309; --amber-bg: #fef3c7;
+    --red-bg: #fee2e2; --grey-bg: #f3f4f6; --grey-ink: #4b5563;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--off-white); color: var(--ink);
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-size: 15px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  [hidden] { display: none !important; }
+  header.bar { background: #fff; border-bottom: 1px solid var(--light-grey); }
+  .bar-inner { max-width: 1040px; margin: 0 auto; padding: 14px 16px; display: flex; align-items: center; gap: 12px; }
+  .logo { font-weight: 800; font-size: 20px; letter-spacing: 0.04em; color: var(--red); }
+  .bar-label { color: var(--dark-grey); font-size: 14px; border-left: 1px solid var(--light-grey); padding-left: 12px; }
+  .bar-spacer { flex: 1; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 48px; }
+  .card { background: #fff; border: 1px solid var(--light-grey); border-radius: 12px; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 2px 0 6px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--dark-grey); margin: 32px 0 12px; font-weight: 600; }
+  .muted { color: var(--dark-grey); }
+  .small { font-size: 13px; }
+  button {
+    font: inherit; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--red); color: #fff; padding: 10px 16px; font-weight: 600;
+  }
+  button:hover { background: var(--red-dark); }
+  button.ghost { background: transparent; color: var(--dark-grey); padding: 6px 10px; font-weight: 500; }
+  button.ghost:hover { background: var(--grey-bg); color: var(--ink); }
+
+  /* Lock screen */
+  .lock { max-width: 400px; margin: 10vh auto 0; padding: 28px; }
+  .lock h1 { font-size: 22px; }
+  .lock label.field { display: block; font-size: 13px; font-weight: 600; margin: 18px 0 6px; }
+  .lock input[type=password] {
+    width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--light-grey); border-radius: 8px;
+  }
+  .lock input[type=password]:focus { outline: 2px solid var(--red-light); border-color: var(--red); }
+  .lock .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+  .lock .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--dark-grey); }
+  .error { color: var(--red); font-size: 13px; margin-top: 10px; }
+
+  /* Summary */
+  .eyebrow { font-size: 13px; font-weight: 600; color: var(--red); text-transform: uppercase; letter-spacing: 0.06em; }
+  .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .s-DONE { background: var(--green-bg); color: var(--green); }
+  .s-IN_PROGRESS { background: var(--amber-bg); color: var(--amber); }
+  .s-BLOCKED, .s-LATE { background: var(--red-bg); color: var(--red-dark); }
+  .s-TODO, .s-NOT_STARTED, .s-ON_HOLD, .s-COMPLETED { background: var(--grey-bg); color: var(--grey-ink); }
+  .s-EMPTY { background: var(--grey-bg); color: #9ca3af; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 20px; }
+  .stat { padding: 16px; }
+  .stat .label { font-size: 13px; color: var(--dark-grey); }
+  .stat .value { font-size: 24px; font-weight: 700; margin-top: 2px; }
+  .stat .value.bad { color: var(--red); }
+  .track { height: 8px; background: var(--grey-bg); border-radius: 999px; overflow: hidden; position: relative; }
+  .fill { height: 100%; background: var(--green); border-radius: 999px; }
+  .pace { padding: 16px; margin-top: 12px; }
+  .pace-row { display: grid; grid-template-columns: 110px 1fr 48px; align-items: center; gap: 12px; font-size: 13px; }
+  .pace-row + .pace-row { margin-top: 8px; }
+  .pace-row .pct { text-align: right; font-weight: 600; }
+  .fill.time { background: var(--dark-grey); }
+
+  /* Phases */
+  .phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .phase-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .phase-card.current { border-color: var(--red); box-shadow: 0 0 0 1px var(--red); }
+  .phase-card .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+  .phase-card .name { font-weight: 600; }
+  .slip { color: var(--amber); font-weight: 600; }
+
+  /* Plan */
+  details.phase { margin-bottom: 10px; overflow: hidden; }
+  details.phase > summary {
+    list-style: none; cursor: pointer; padding: 14px 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  details.phase > summary::-webkit-details-marker { display: none; }
+  details.phase > summary::before { content: "▸"; color: var(--dark-grey); transition: transform .15s; }
+  details.phase[open] > summary::before { transform: rotate(90deg); }
+  details.phase > summary .name { font-weight: 600; }
+  details.phase > summary .grow { flex: 1; }
+  .items { border-top: 1px solid var(--light-grey); }
+  .item { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 14px; align-items: center; padding: 10px 16px; }
+  .item + .item { border-top: 1px solid #ececee; }
+  .item .title { font-weight: 500; }
+  .item.done .title { color: var(--dark-grey); }
+  .item .meta { font-size: 13px; color: var(--dark-grey); text-align: right; white-space: nowrap; }
+  .item .meta.bad { color: var(--red); font-weight: 600; }
+  .empty { padding: 12px 16px; color: var(--dark-grey); font-size: 13px; border-top: 1px solid var(--light-grey); }
+  @media (max-width: 640px) {
+    h1 { font-size: 22px; }
+    .item { grid-template-columns: 1fr auto; }
+    .item .meta { grid-column: 1 / -1; text-align: left; }
+    .pace-row { grid-template-columns: 90px 1fr 40px; }
+  }
+
+  .recent { padding: 4px 0; }
+  footer { margin-top: 40px; font-size: 13px; color: var(--dark-grey); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="bar-inner">
+    <span class="logo">IDX</span>
+    <span class="bar-label">Project progress</span>
+    <span class="bar-spacer"></span>
+    <button class="ghost small" id="lock-btn" hidden>Lock</button>
+  </div>
+</header>
+
+<main>
+  <form class="card lock" id="lock" hidden>
+    <div class="eyebrow">Shared by IDX</div>
+    <h1>Enter the password</h1>
+    <p class="muted small" style="margin:0">This page shows the live progress of your project with IDX. Your IDX contact sent you the password separately.</p>
+    <label class="field" for="pw">Password</label>
+    <input id="pw" type="password" autocomplete="current-password" autocapitalize="none" spellcheck="false" required>
+    <div class="error" id="lock-error" hidden></div>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="remember"> Remember on this device</label>
+      <button type="submit" id="unlock-btn">Unlock</button>
+    </div>
+  </form>
+
+  <p class="muted" id="status">Loading…</p>
+  <div id="app" hidden></div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const STORE_KEY = "idx-share:" + location.pathname;
+  const STATUS = { TODO: "To do", IN_PROGRESS: "In progress", BLOCKED: "Blocked", DONE: "Done" };
+  const PHASE = { EMPTY: "No deliverables", NOT_STARTED: "Not started", IN_PROGRESS: "In progress", LATE: "Late", DONE: "Done" };
+  const ENGAGEMENT = { ACTIVE: "Active", ON_HOLD: "On hold", COMPLETED: "Completed" };
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const DAY_MS = 86400000;
+
+  const $ = (id) => document.getElementById(id);
+  let envelope = null;
+
+  // ─── Storage (may be blocked; never required) ───
+  const store = {
+    get() { try { return localStorage.getItem(STORE_KEY); } catch { return null; } },
+    set(v) { try { localStorage.setItem(STORE_KEY, v); } catch {} },
+    clear() { try { localStorage.removeItem(STORE_KEY); } catch {} },
+  };
+
+  // ─── Crypto ───
+  const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+  async function decrypt(password) {
+    const enc = new TextEncoder();
+    const base = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", hash: "SHA-256", salt: enc.encode(envelope.salt), iterations: envelope.iterations }, base, 512);
+    const key = await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-GCM", false, ["decrypt"]);
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(envelope.iv) }, key, b64(envelope.data));
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  // ─── Dates ("YYYY-MM-DD" strings, compared as text) ───
+  const pad = (n) => String(n).padStart(2, "0");
+  const localYmd = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const utc = (ymd) => Date.UTC(+ymd.slice(0, 4), +ymd.slice(5, 7) - 1, +ymd.slice(8, 10));
+  const daysBetween = (a, b) => Math.round((utc(b) - utc(a)) / DAY_MS);
+  const addDays = (ymd, n) => new Date(utc(ymd) + n * DAY_MS).toISOString().slice(0, 10);
+  function fmt(ymd, withYear = true) {
+    const d = new Date(utc(ymd));
+    return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}${withYear ? " " + d.getUTCFullYear() : ""}`;
+  }
+  function fmtRange(a, b) {
+    if (!a && !b) return "No dates set";
+    if (a && b && a.slice(0, 4) === b.slice(0, 4)) return `${fmt(a, false)} – ${fmt(b)}`;
+    return `${a ? fmt(a) : "?"} – ${b ? fmt(b) : "?"}`;
+  }
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+  // ─── Derived state (mirrors the helpdesk tracker and its Monday mail) ───
+  function phaseState(p, today) {
+    const total = p.deliverables.length;
+    if (total === 0) return "EMPTY";
+    if (p.deliverables.every((d) => d.status === "DONE")) return "DONE";
+    if (p.dueDate && p.dueDate < today) return "LATE";
+    const started = p.deliverables.some((d) => d.status !== "TODO" || d.tasksDone > 0);
+    return started ? "IN_PROGRESS" : "NOT_STARTED";
+  }
+  const slip = (due, original) => (due && original && due > original ? daysBetween(original, due) : 0);
+  const overdue = (d, today) => d.status !== "DONE" && d.dueDate && d.dueDate < today;
+
+  // ─── DOM ───
+  function h(tag, attrs, ...children) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === false || v == null) continue;
+      if (k === "class") el.className = v;
+      else el.setAttribute(k, v === true ? "" : v);
+    }
+    for (const c of children.flat()) if (c != null && c !== false) el.append(c);
+    return el;
+  }
+  const pill = (state, label) => h("span", { class: `pill s-${state}` }, label);
+
+  function render(snap) {
+    const today = localYmd(new Date());
+    const e = snap.engagement;
+    const all = snap.phases.flatMap((p) => p.deliverables);
+    const done = all.filter((d) => d.status === "DONE").length;
+    const late = all.filter((d) => overdue(d, today));
+    const soon = all.filter((d) => d.status !== "DONE" && d.dueDate && d.dueDate >= today && d.dueDate <= addDays(today, 6));
+    const states = snap.phases.map((p) => phaseState(p, today));
+    const phasesDone = states.filter((s) => s === "DONE").length;
+    // The current phase: the first one not finished
+    const currentIndex = states.findIndex((s) => s !== "DONE" && s !== "EMPTY");
+
+    document.title = `${e.name} · ${e.clientName} · IDX`;
+    const app = $("app");
+    app.replaceChildren();
+
+    // Heading
+    let timing = "";
+    if (e.endDate) {
+      const left = daysBetween(today, e.endDate);
+      timing = left > 0 ? `${plural(left, "day")} left` : left === 0 ? "Ends today" : `Ended ${fmt(e.endDate)}`;
+    }
+    app.append(
+      h("div", { class: "eyebrow" }, e.clientName),
+      h("h1", {}, e.name),
+      h("div", { class: "muted" },
+        [fmtRange(e.startDate, e.endDate), timing].filter(Boolean).join(" · "), " ",
+        e.status !== "ACTIVE" ? pill(e.status, ENGAGEMENT[e.status]) : null),
+    );
+
+    // Stats
+    const pct = all.length ? Math.round((done / all.length) * 100) : 0;
+    app.append(h("div", { class: "stats" },
+      h("div", { class: "card stat" },
+        h("div", { class: "label" }, "Deliverables complete"),
+        h("div", { class: "value" }, `${done} of ${all.length}`),
+        h("div", { class: "track" }, h("div", { class: "fill", style: `width:${pct}%` }))),
+      h("div", { class: "card stat" },
+        h("div", { class: "label" }, "Phases complete"),
+        h("div", { class: "value" }, `${phasesDone} of ${snap.phases.length}`),
+        h("div", { class: "small muted" }, currentIndex >= 0 ? `Now: ${snap.phases[currentIndex].name}` : "")),
+      h("div", { class: "card stat" },
+        h("div", { class: "label" }, "Due in the next 7 days"),
+        h("div", { class: "value" }, String(soon.length))),
+      h("div", { class: "card stat" },
+        h("div", { class: "label" }, "Past their deadline"),
+        h("div", { class: `value${late.length ? " bad" : ""}` }, String(late.length))),
+    ));
+
+    // Time elapsed vs work done
+    if (e.startDate && e.endDate && e.endDate > e.startDate) {
+      const span = daysBetween(e.startDate, e.endDate);
+      const elapsed = Math.min(100, Math.max(0, Math.round((daysBetween(e.startDate, today) / span) * 100)));
+      const row = (label, value, cls) => h("div", { class: "pace-row" },
+        h("span", { class: "muted" }, label),
+        h("div", { class: "track" }, h("div", { class: `fill ${cls}`, style: `width:${value}%` })),
+        h("span", { class: "pct" }, `${value}%`));
+      app.append(h("div", { class: "card pace" }, row("Time elapsed", elapsed, "time"), row("Work done", pct, "")));
+    }
+
+    // Phases overview
+    if (snap.phases.length) {
+      app.append(h("h2", {}, "Phases"));
+      app.append(h("div", { class: "phases" }, snap.phases.map((p, i) => {
+        const pDone = p.deliverables.filter((d) => d.status === "DONE").length;
+        const pPct = p.deliverables.length ? Math.round((pDone / p.deliverables.length) * 100) : 0;
+        const s = slip(p.dueDate, p.originalDueDate);
+        return h("div", { class: `card phase-card${i === currentIndex ? " current" : ""}` },
+          h("div", { class: "top" }, h("span", { class: "name" }, p.name), pill(states[i], PHASE[states[i]])),
+          h("div", { class: "small muted" }, fmtRange(p.startDate, p.dueDate),
+            s ? h("span", { class: "slip", title: `Moved from ${fmt(p.originalDueDate)}` }, ` +${s}d`) : null),
+          h("div", { class: "track" }, h("div", { class: "fill", style: `width:${pPct}%` })),
+          h("div", { class: "small muted" }, `${pDone} of ${plural(p.deliverables.length, "deliverable")} done`));
+      })));
+    }
+
+    // Plan
+    app.append(h("h2", {}, "Plan"));
+    snap.phases.forEach((p, i) => {
+      const state = states[i];
+      const start = p.startDate || (i > 0 ? snap.phases[i - 1].dueDate : null);
+      const current = (!start || start <= today) && (!p.dueDate || p.dueDate >= today);
+      const open = state !== "DONE" && (state !== "NOT_STARTED" || current);
+      const pDone = p.deliverables.filter((d) => d.status === "DONE").length;
+      app.append(h("details", { class: "card phase", open },
+        h("summary", {},
+          h("span", { class: "name" }, p.name),
+          pill(state, PHASE[state]),
+          h("span", { class: "grow" }),
+          h("span", { class: "small muted" }, `${pDone}/${p.deliverables.length} · ${fmtRange(p.startDate, p.dueDate)}`)),
+        p.deliverables.length
+          ? h("div", { class: "items" }, p.deliverables.map((d) => deliverableRow(d, today)))
+          : h("div", { class: "empty" }, "No deliverables yet.")));
+    });
+
+    // Recently finished
+    const recent = all
+      .filter((d) => d.status === "DONE" && d.completedOn && d.completedOn >= addDays(today, -14))
+      .sort((a, b) => b.completedOn.localeCompare(a.completedOn));
+    if (recent.length) {
+      app.append(h("h2", {}, "Completed in the last two weeks"));
+      app.append(h("div", { class: "card recent" }, recent.map((d) =>
+        h("div", { class: "item done" },
+          h("span", { class: "title" }, d.title), h("span"),
+          h("span", { class: "meta" }, fmt(d.completedOn, false))))));
+    }
+
+    app.append(h("footer", {},
+      h("span", {}, snap.lastChangedAt
+        ? `Last updated ${new Date(snap.lastChangedAt).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}`
+        : ""),
+      h("span", {}, "Read-only view, shared by IDX")));
+  }
+
+  function deliverableRow(d, today) {
+    let meta = "", bad = false;
+    if (d.status === "DONE") meta = d.completedOn ? `Done ${fmt(d.completedOn, false)}` : "Done";
+    else if (d.dueDate) {
+      const days = daysBetween(today, d.dueDate);
+      bad = days < 0;
+      meta = days < 0 ? `Due ${fmt(d.dueDate, false)} · ${plural(-days, "day")} late`
+        : days === 0 ? "Due today"
+        : days === 1 ? "Due tomorrow"
+        : `Due ${fmt(d.dueDate, false)}`;
+    } else meta = "No deadline yet";
+    const s = d.status !== "DONE" ? slip(d.dueDate, d.originalDueDate) : 0;
+    return h("div", { class: `item${d.status === "DONE" ? " done" : ""}` },
+      h("div", {},
+        h("div", { class: "title" }, d.title),
+        d.tasksTotal ? h("div", { class: "small muted" }, `${d.tasksDone} of ${plural(d.tasksTotal, "step")} done`) : null),
+      pill(d.status, STATUS[d.status]),
+      h("span", { class: `meta${bad ? " bad" : ""}` }, meta,
+        s ? h("span", { class: "slip", title: `Moved from ${fmt(d.originalDueDate)}` }, ` +${s}d`) : null));
+  }
+
+  // ─── Flow ───
+  function show(snap) {
+    $("lock").hidden = true;
+    $("status").hidden = true;
+    $("lock-btn").hidden = false;
+    $("app").hidden = false;
+    render(snap);
+  }
+
+  function showLock(message) {
+    $("status").hidden = true;
+    $("app").hidden = true;
+    $("lock-btn").hidden = true;
+    $("lock").hidden = false;
+    $("lock-error").hidden = !message;
+    $("lock-error").textContent = message || "";
+    $("pw").value = "";
+    $("pw").focus();
+  }
+
+  $("lock").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const password = $("pw").value.trim().toLowerCase();
+    $("unlock-btn").disabled = true;
+    $("unlock-btn").textContent = "Unlocking…";
+    try {
+      const snap = await decrypt(password);
+      if ($("remember").checked) store.set(password);
+      show(snap);
+    } catch {
+      showLock("That password didn't work. Check it and try again.");
+    } finally {
+      $("unlock-btn").disabled = false;
+      $("unlock-btn").textContent = "Unlock";
+    }
+  });
+
+  $("lock-btn").addEventListener("click", () => { store.clear(); showLock(); });
+
+  (async () => {
+    try {
+      const res = await fetch("data.json", { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      envelope = await res.json();
+    } catch {
+      $("status").textContent = "This page isn't available right now. Please contact your IDX representative.";
+      return;
+    }
+    if (!crypto.subtle) {
+      $("status").textContent = "This page needs a secure (https) connection to open.";
+      return;
+    }
+    const saved = store.get();
+    if (saved) {
+      try { show(await decrypt(saved)); return; } catch { store.clear(); }
+    }
+    showLock();
+  })();
+})();
+</script>
+</body>
+</html>
