@@ -722,7 +722,8 @@
     ed.latestXml = start.xml;
     ed.savedXml = start.xml;
     ed.basis = start.basis;
-    ed.iframe = h("iframe", { src: DRAWIO_URL, title: "Diagram editor", allow: "clipboard-read; clipboard-write" });
+    // No referrer, as in the helpdesk: diagrams.net refuses pages whose address has a port
+    ed.iframe = h("iframe", { src: DRAWIO_URL, title: "Diagram editor", allow: "clipboard-read; clipboard-write", referrerpolicy: "no-referrer" });
     frameBox.replaceChildren(ed.iframe);
     ed.loadTimer = setTimeout(() => {
       if (editor === ed && !ed.ready) {
