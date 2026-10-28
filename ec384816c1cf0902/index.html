@@ -1,9 +1,13 @@
 <!doctype html>
 <!--
-  Read-only client progress page. Published by the IDX Helpdesk
+  Client progress page. Published by the IDX Helpdesk
   (backend/src/services/clientShare.ts) next to an encrypted data.json; the
   password decrypts it here in the browser (PBKDF2-SHA256 → AES-256-GCM).
-  Self-contained on purpose: no external scripts, fonts or trackers.
+  Self-contained on purpose: no external scripts, fonts or trackers. The one
+  exception is the draw.io editor (embed.diagrams.net), which loads only when
+  the client opens a diagram IDX shared, in an iframe that gets the diagram
+  and nothing else. The client's saves are encrypted here with the same key
+  and written to IDX's private inbox repo (backend/src/services/diagramInbox.ts).
 -->
 <html lang="en">
 <head>
@@ -11,6 +15,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' https://api.github.com; frame-src https://embed.diagrams.net; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'">
 <title>Project progress · IDX</title>
 <style>
   :root {
@@ -113,6 +118,34 @@
 
   .recent { padding: 4px 0; }
   footer { margin-top: 40px; font-size: 13px; color: var(--dark-grey); display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; }
+
+  /* Diagrams */
+  .diagrams { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  button.diagram-card {
+    background: #fff; color: var(--ink); text-align: left; font-weight: 400; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 4px; border: 1px solid var(--light-grey);
+  }
+  button.diagram-card:hover { background: #fff; border-color: var(--red); }
+  .diagram-card .name { font-weight: 600; }
+  .diagram-card .open { color: var(--red); font-size: 13px; font-weight: 600; margin-top: 4px; }
+  .editor { position: fixed; inset: 0; z-index: 50; background: #fff; display: flex; flex-direction: column; }
+  .editor-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--light-grey); flex-wrap: wrap; }
+  .editor-bar .title { flex: 1; min-width: 200px; display: flex; flex-direction: column; }
+  .editor-bar .title strong { font-size: 16px; }
+  .editor-notice { padding: 8px 12px; font-size: 13px; background: var(--amber-bg); color: #78350f; border-bottom: 1px solid #fcd34d; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .editor-notice.bad { background: var(--red-bg); color: var(--red-dark); border-color: var(--red-light); }
+  .editor-notice.tip { background: var(--grey-bg); color: var(--grey-ink); border-color: var(--light-grey); }
+  .editor-notice button { padding: 4px 10px; font-size: 13px; }
+  .editor-frame { flex: 1; min-height: 0; position: relative; }
+  .editor-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .editor-frame .message { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; color: var(--dark-grey); }
+  .modal-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .modal { width: 100%; max-width: 440px; padding: 20px; }
+  .modal h2 { font-size: 18px; text-transform: none; letter-spacing: 0; color: var(--ink); margin: 0 0 6px; }
+  .modal label.field { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+  .modal input, .modal textarea { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--light-grey); border-radius: 8px; }
+  .modal textarea { min-height: 72px; resize: vertical; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 </style>
 </head>
 <body>
@@ -156,6 +189,9 @@
 
   const $ = (id) => document.getElementById(id);
   let envelope = null;
+  // The unlocked page's key: opens data.json and the diagram files, and seals the client's diagram saves
+  let pageKey = null;
+  let snapshot = null;
 
   // ─── Storage (may be blocked; never required) ───
   const store = {
@@ -163,18 +199,42 @@
     set(v) { try { localStorage.setItem(STORE_KEY, v); } catch {} },
     clear() { try { localStorage.removeItem(STORE_KEY); } catch {} },
   };
+  const local = {
+    get(key) { try { return JSON.parse(localStorage.getItem(key) || "null"); } catch { return null; } },
+    set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} },
+    clear(key) { try { localStorage.removeItem(key); } catch {} },
+  };
 
   // ─── Crypto ───
   const b64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  function toB64(bytes) {
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(binary);
+  }
 
-  async function decrypt(password) {
+  /** Derives the page key from the password and opens data.json with it. */
+  async function unlock(password) {
     const enc = new TextEncoder();
     const base = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
     const bits = await crypto.subtle.deriveBits(
       { name: "PBKDF2", hash: "SHA-256", salt: enc.encode(envelope.salt), iterations: envelope.iterations }, base, 512);
-    const key = await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-GCM", false, ["decrypt"]);
-    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(envelope.iv) }, key, b64(envelope.data));
+    const key = await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-GCM", false, ["encrypt", "decrypt"]);
+    const snap = await openEnvelope(envelope, key);
+    pageKey = key;
+    return snap;
+  }
+
+  async function openEnvelope(sealed, key = pageKey) {
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64(sealed.iv) }, key, b64(sealed.data));
     return JSON.parse(new TextDecoder().decode(plain));
+  }
+
+  /** The same envelope IDX publishes, with a random IV; only the page key opens it. */
+  async function seal(value) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const data = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, pageKey, new TextEncoder().encode(JSON.stringify(value))));
+    return JSON.stringify({ v: 1, kdf: "PBKDF2-SHA256", iterations: envelope.iterations, salt: envelope.salt, iv: toB64(iv), data: toB64(data) });
   }
 
   // ─── Dates ("YYYY-MM-DD" strings, compared as text) ───
@@ -279,6 +339,19 @@
       app.append(h("div", { class: "card pace" }, row("Time elapsed", elapsed, "time"), row("Work done", pct, "")));
     }
 
+    // Diagrams IDX shared: open in the draw.io editor, and saves go back to IDX
+    if (snap.diagrams && snap.diagrams.length) {
+      app.append(h("h2", {}, "Diagrams"));
+      app.append(h("div", { class: "diagrams" }, snap.diagrams.map((d) => {
+        const card = h("button", { type: "button", class: "card diagram-card" },
+          h("span", { class: "name" }, d.name),
+          h("span", { class: "small muted" }, `Updated ${fmtStamp(d.updatedAt)}`),
+          h("span", { class: "open" }, snap.inbox ? "Open to view or edit" : "Open"));
+        card.addEventListener("click", () => openDiagram(d));
+        return card;
+      })));
+    }
+
     // Phases overview
     if (snap.phases.length) {
       app.append(h("h2", {}, "Phases"));
@@ -330,7 +403,7 @@
       h("span", {}, snap.lastChangedAt
         ? `Last updated ${new Date(snap.lastChangedAt).toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}`
         : ""),
-      h("span", {}, "Read-only view, shared by IDX")));
+      h("span", {}, "Shared by IDX")));
   }
 
   function deliverableRow(d, today) {
@@ -354,8 +427,478 @@
         s ? h("span", { class: "slip", title: `Moved from ${fmt(d.originalDueDate)}` }, ` +${s}d`) : null));
   }
 
+  // ─── Diagrams ───
+  // A shared diagram opens full screen in the draw.io editor (embed.diagrams.net),
+  // with the same settings and IDX shape library as the helpdesk's own editor
+  // (frontend/src/utils/drawio.ts: keep the two in step). Saving encrypts the
+  // diagram with the page key and writes it once to IDX's private inbox repo as
+  // <slug>/<diagramId>/<ms>-<saveId>.json. IDX picks it up at its next sync and
+  // acknowledges it in the diagram file (clientSaves), which is how the page
+  // tells a save still on its way from one IDX already has.
+  const DRAWIO_ORIGIN = "https://embed.diagrams.net";
+  const DRAWIO_URL = DRAWIO_ORIGIN + "/?embed=1&proto=json&spin=1&configure=1&libraries=1&stealth=1&plugins=0&noExitBtn=1&saveAndExit=0&lang=en";
+  const IDX_COLORS = ["CF142B", "A81023", "F5D0D4", "F7F7F8", "717370", "D1D3D4"];
+  const IDX_SHAPES = [
+    { title: "Client note", value: "Note", w: 200, h: 100, style: "shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;size=14;fillColor=#FFF2CC;strokeColor=#D6B656;fontColor=#333333;align=left;verticalAlign=top;spacingLeft=8;spacingTop=4;idxNote=1;" },
+    { title: "IDX component", value: "IDX component", w: 160, h: 60, style: "rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#CF142B;strokeColor=#A81023;fontColor=#FFFFFF;" },
+    { title: "Client component", value: "Client component", w: 160, h: 60, style: "rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#F7F7F8;strokeColor=#717370;fontColor=#333333;" },
+    { title: "Third-party component", value: "Third-party component", w: 160, h: 60, style: "rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#D1D3D4;fontColor=#717370;" },
+    { title: "Planned (not built yet)", value: "Planned", w: 160, h: 60, style: "rounded=1;arcSize=10;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#CF142B;dashed=1;fontColor=#CF142B;" },
+    { title: "Zone (network, site, cloud)", value: "Zone", w: 400, h: 240, style: "rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#FAFAFA;strokeColor=#D1D3D4;verticalAlign=top;align=left;spacingLeft=10;spacingTop=4;fontStyle=1;fontColor=#717370;container=1;collapsible=0;" },
+  ];
+  const MAX_SAVE_BYTES = 5 * 1024 * 1024;
+  const NAME_KEY = "idx-share-name";
+  const INBOX_FILE = /^(\d{13})-([0-9a-f-]{36})\.json$/;
+  const LOAD_TIMEOUT_MS = 20000;
+  const fmtStamp = (iso) => new Date(iso).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const slug = () => envelope.salt;
+  const draftKey = (diagramId) => `idx-share-draft:${location.pathname}:${diagramId}`;
+
+  /** draw.io's compressed form, which its libraries expect: base64(deflateRaw(encodeURIComponent(xml))). */
+  async function drawioCompress(text) {
+    const stream = new Blob([encodeURIComponent(text)]).stream().pipeThrough(new CompressionStream("deflate-raw"));
+    return toB64(new Uint8Array(await new Response(stream).arrayBuffer()));
+  }
+
+  async function drawioConfig() {
+    const config = { compressXml: false, customPresetColors: IDX_COLORS };
+    try {
+      const data = await Promise.all(IDX_SHAPES.map(async (s) => ({
+        title: s.title, w: s.w, h: s.h,
+        xml: await drawioCompress(`<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="2" value="${s.value}" style="${s.style}" vertex="1" parent="1"><mxGeometry width="${s.w}" height="${s.h}" as="geometry"/></mxCell></root></mxGraphModel>`),
+      })));
+      config.libraries = [{ title: { main: "IDX" }, entries: [{ id: "idx", title: { main: "IDX" }, desc: { main: "Client notes and IDX diagram conventions" }, libs: [{ title: { main: "IDX" }, data }] }] }];
+      config.defaultLibraries = "idx;general;basic;arrows2;network";
+    } catch {
+      // The editor works without it
+    }
+    return config;
+  }
+
+  // The inbox repo, with the token that came sealed in data.json. Only the
+  // headers GitHub allows from a browser (no X-GitHub-Api-Version).
+  function inboxCall(method, path, { body, raw } = {}) {
+    const inbox = snapshot.inbox;
+    return fetch(`https://api.github.com/repos/${inbox.repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}`, {
+      method,
+      cache: "no-store",
+      headers: {
+        Authorization: `Bearer ${inbox.token}`,
+        Accept: raw ? "application/vnd.github.raw+json" : "application/vnd.github+json",
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+  }
+
+  /** This diagram's saves still in the inbox, newest first. */
+  async function listInbox(diagramId) {
+    const res = await inboxCall("GET", `${slug()}/${diagramId}`);
+    if (res.status === 404) return [];
+    if (!res.ok) throw new Error(`GitHub said ${res.status}`);
+    const files = await res.json();
+    return files
+      .flatMap((f) => {
+        const m = INBOX_FILE.exec(f.name);
+        return m ? [{ path: f.path, ms: Number(m[1]), saveId: m[2] }] : [];
+      })
+      .sort((a, b) => b.ms - a.ms);
+  }
+
+  async function readInboxSave(path) {
+    const res = await inboxCall("GET", path, { raw: true });
+    if (!res.ok) throw new Error(`GitHub said ${res.status}`);
+    return openEnvelope(JSON.parse(await res.text()));
+  }
+
+  /** Each save is a new file, so saves never overwrite each other; a busy repo is retried. */
+  async function writeInboxSave(path, sealedText) {
+    for (let attempt = 1; ; attempt++) {
+      const res = await inboxCall("PUT", path, { body: { message: "save", content: btoa(sealedText) } });
+      // 422: it's already there (an earlier attempt went through)
+      if (res.ok || res.status === 422) return;
+      if ((res.status === 409 || res.status >= 500) && attempt < 3) {
+        await sleep(800 * attempt);
+        continue;
+      }
+      throw new Error(res.status === 401 || res.status === 403 ? "saving to IDX isn't allowed any more" : `GitHub said ${res.status}`);
+    }
+  }
+
+  // The open diagram, or null
+  let editor = null;
+
+  function post(message) {
+    editor?.iframe?.contentWindow?.postMessage(JSON.stringify(message), DRAWIO_ORIGIN);
+  }
+
+  function loadXml(xml, modified = false) {
+    editor.latestXml = xml;
+    post({ action: "load", xml, autosave: 1, title: editor.entry.name, ...(modified ? { modified: "unsavedChanges" } : {}) });
+  }
+
+  function setStatus(text) {
+    editor.status.textContent = text;
+  }
+
+  /** The strip under the bar: a tip, a warning or a problem, with optional buttons. */
+  function setNotice(text, { tone = "warn", actions = [] } = {}) {
+    const notice = editor.notice;
+    notice.replaceChildren();
+    notice.hidden = !text;
+    if (!text) return;
+    notice.className = `editor-notice ${tone}`;
+    notice.append(h("span", {}, text));
+    for (const action of actions) {
+      const button = h("button", { type: "button" }, action.label);
+      button.addEventListener("click", action.onClick);
+      notice.append(button);
+    }
+  }
+
+  function setDirty(dirty) {
+    editor.dirty = dirty;
+  }
+
+  /** Unsaved edits are kept in this browser, so a closed tab doesn't lose them. */
+  function keepDraft(now = false) {
+    const ed = editor;
+    clearTimeout(ed.draftTimer);
+    const write = () => {
+      if (ed.dirty) local.set(draftKey(ed.entry.id), { xml: ed.latestXml, basis: ed.basis, savedAt: new Date().toISOString() });
+      else local.clear(draftKey(ed.entry.id));
+    };
+    if (now) write();
+    else ed.draftTimer = setTimeout(write, 500);
+  }
+
+  function modal(title, body, buttons) {
+    return new Promise((resolve) => {
+      const backdrop = h("div", { class: "modal-backdrop" });
+      const done = (value) => {
+        backdrop.remove();
+        resolve(value);
+      };
+      const box = h("div", { class: "card modal", role: "dialog", "aria-modal": "true", "aria-label": title },
+        h("h2", {}, title), h("p", { class: "muted small" }, body),
+        h("div", { class: "actions" }, buttons.map((b) => {
+          const button = h("button", { type: "button", class: b.primary ? "" : "ghost" }, b.label);
+          button.addEventListener("click", () => done(b.value));
+          return button;
+        })));
+      backdrop.append(box);
+      backdrop.addEventListener("keydown", (e) => { if (e.key === "Escape") done(null); });
+      document.body.append(backdrop);
+      box.querySelector("button")?.focus();
+    });
+  }
+
+  /** Who's sending, and what they changed. Null when they cancel. */
+  function askSaveDetails() {
+    return new Promise((resolve) => {
+      const nameInput = h("input", { id: "save-name", type: "text", maxlength: "80", autocomplete: "name" });
+      nameInput.value = (() => { try { return localStorage.getItem(NAME_KEY) || ""; } catch { return ""; } })();
+      const messageInput = h("textarea", { id: "save-message", maxlength: "500", placeholder: "e.g. Moved the historian into our DMZ" });
+      const error = h("div", { class: "error", hidden: true });
+      const cancel = h("button", { type: "button", class: "ghost" }, "Cancel");
+      const form = h("form", { class: "card modal", role: "dialog", "aria-modal": "true", "aria-label": "Send your changes to IDX" },
+        h("h2", {}, "Send your changes to IDX"),
+        h("p", { class: "muted small", style: "margin:0" }, "IDX sees them within about 15 minutes. If they changed the diagram in the meantime, they'll merge the two."),
+        h("label", { class: "field", for: "save-name" }, "Your name"), nameInput,
+        h("label", { class: "field", for: "save-message" }, "What did you change? (optional)"), messageInput,
+        error,
+        h("div", { class: "actions" }, cancel, h("button", { type: "submit" }, "Send to IDX")));
+      const backdrop = h("div", { class: "modal-backdrop" }, form);
+      const done = (value) => {
+        backdrop.remove();
+        resolve(value);
+      };
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const name = nameInput.value.trim();
+        if (!name) {
+          error.textContent = "Add your name, so IDX knows who made the change.";
+          error.hidden = false;
+          nameInput.focus();
+          return;
+        }
+        try { localStorage.setItem(NAME_KEY, name); } catch {}
+        done({ name, message: messageInput.value.trim() });
+      });
+      cancel.addEventListener("click", () => done(null));
+      backdrop.addEventListener("keydown", (e) => { if (e.key === "Escape") done(null); });
+      document.body.append(backdrop);
+      (nameInput.value ? messageInput : nameInput).focus();
+    });
+  }
+
+  function downloadCurrent() {
+    if (!editor?.latestXml) return;
+    const url = URL.createObjectURL(new Blob([editor.latestXml], { type: "application/xml" }));
+    const link = h("a", { href: url, download: `${editor.entry.name.replace(/[\\/:*?"<>|]+/g, "-").trim() || "diagram"}.drawio` });
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function openDiagram(entry) {
+    if (editor) return;
+    const status = h("span", { class: "small muted" }, "Loading…");
+    const notice = h("div", { class: "editor-notice", hidden: true });
+    const frameBox = h("div", { class: "editor-frame" }, h("div", { class: "message" }, "Loading…"));
+    const downloadButton = h("button", { type: "button", class: "ghost small" }, "Download");
+    const closeButton = h("button", { type: "button", class: "ghost small" }, "Close");
+    const root = h("div", { class: "editor", role: "dialog", "aria-modal": "true", "aria-label": entry.name },
+      h("div", { class: "editor-bar" }, h("div", { class: "title" }, h("strong", {}, entry.name), status), downloadButton, closeButton),
+      notice, frameBox);
+    downloadButton.addEventListener("click", downloadCurrent);
+    closeButton.addEventListener("click", () => closeDiagram());
+    document.body.append(root);
+    document.body.style.overflow = "hidden";
+    const ed = { entry, root, status, notice, frameBox, iframe: null, started: false, ready: false, dirty: false, sending: false, latestXml: null, savedXml: null, startXml: null, basis: null, draft: null, draftTimer: 0, loadTimer: 0 };
+    editor = ed;
+
+    let file;
+    try {
+      const res = await fetch(`diagrams/${encodeURIComponent(entry.id)}.json?t=${Date.now()}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(String(res.status));
+      file = await openEnvelope(await res.json());
+      // The list is newer than the file: IDX is part-way through publishing
+      if (file.number < entry.number) throw new Error("stale");
+    } catch {
+      if (editor === ed) {
+        frameBox.replaceChildren(h("div", { class: "message" }, "This diagram is being updated. Close it and try again in a minute."));
+        setStatus("");
+      }
+      return;
+    }
+    if (editor !== ed) return;
+
+    // Start from the newest save IDX hasn't picked up yet (yours or a colleague's), else IDX's version
+    const acknowledged = new Set(file.clientSaves.map((s) => s.saveId));
+    let start = { xml: file.xml, basis: { baseVersionId: file.versionId, parentSaveId: null } };
+    let statusText = `Version ${file.number} · updated ${fmtStamp(file.updatedAt)}`;
+    let inboxFiles = [];
+    let inboxFailed = false;
+    if (snapshot.inbox) {
+      try {
+        inboxFiles = await listInbox(entry.id);
+        const pending = inboxFiles.find((f) => !acknowledged.has(f.saveId));
+        if (pending) {
+          const save = await readInboxSave(pending.path);
+          start = { xml: save.xml, basis: { baseVersionId: save.baseVersionId, parentSaveId: save.saveId } };
+          statusText = `Changes saved by ${save.name} ${fmtStamp(save.savedAt)}, on their way to IDX`;
+        }
+      } catch {
+        inboxFailed = true;
+      }
+    }
+    if (editor !== ed) return;
+
+    const draft = local.get(draftKey(entry.id));
+    ed.draft = draft && typeof draft.xml === "string" && draft.basis && draft.xml !== start.xml ? draft : null;
+    setStatus(statusText);
+
+    const held = file.clientSaves.find((s) => s.state === "HELD");
+    const latest = file.clientSaves[0];
+    if (held) {
+      const heldFile = inboxFiles.find((f) => f.saveId === held.saveId);
+      setNotice(`Changes ${held.by ? `${held.by} ` : ""}saved ${fmtStamp(held.savedAt)} are with IDX to merge, because the diagram changed after they were opened. You're looking at IDX's current version.`, {
+        actions: heldFile ? [{ label: "Open those changes", onClick: () => openHeld(heldFile) }] : [],
+      });
+    } else if (latest && latest.state === "REJECTED") {
+      setNotice(`IDX couldn't read the changes saved ${fmtStamp(latest.savedAt)}. Please download the diagram and send it to your IDX contact.`, { tone: "bad" });
+    } else if (inboxFailed) {
+      setNotice("Couldn't check for changes that haven't reached IDX yet, so you're looking at IDX's latest version.");
+    } else if (snapshot.inbox) {
+      setNotice("Edit the diagram, then press Save (or Ctrl+S) to send your changes to IDX. Add notes with the Client note shape in the IDX section on the left.", { tone: "tip" });
+    } else {
+      setNotice("You can look around and download this diagram. Saving changes to IDX isn't switched on for this page yet.", { tone: "tip" });
+    }
+
+    ed.startXml = start.xml;
+    ed.latestXml = start.xml;
+    ed.savedXml = start.xml;
+    ed.basis = start.basis;
+    ed.iframe = h("iframe", { src: DRAWIO_URL, title: "Diagram editor", allow: "clipboard-read; clipboard-write" });
+    frameBox.replaceChildren(ed.iframe);
+    ed.loadTimer = setTimeout(() => {
+      if (editor === ed && !ed.ready) {
+        frameBox.append(h("div", { class: "message" }, "The diagram editor didn't load. It comes from embed.diagrams.net, so your network needs to allow that site. You can still Download the diagram."));
+      }
+    }, LOAD_TIMEOUT_MS);
+  }
+
+  /** Puts a held save (waiting for IDX) back on the canvas; saving on top of it replaces it. */
+  async function openHeld(heldFile) {
+    const ed = editor;
+    if (!ed) return;
+    if (ed.dirty) {
+      const ok = await modal("Replace your unsaved changes?", "Your edits that haven't been sent to IDX will be replaced.", [
+        { label: "Cancel", value: false },
+        { label: "Open those changes", value: true, primary: true },
+      ]);
+      if (!ok || editor !== ed) return;
+    }
+    try {
+      const save = await readInboxSave(heldFile.path);
+      if (editor !== ed) return;
+      ed.basis = { baseVersionId: save.baseVersionId, parentSaveId: save.saveId };
+      ed.savedXml = save.xml;
+      if (ed.started) loadXml(save.xml);
+      else ed.startXml = save.xml;
+      setDirty(false);
+      keepDraft(true);
+      setStatus(`Changes saved by ${save.name} ${fmtStamp(save.savedAt)}, waiting for IDX to merge`);
+      setNotice("Sending these again replaces the version waiting with IDX.", { tone: "tip" });
+    } catch {
+      setNotice("Those changes aren't available any more.", { tone: "bad" });
+    }
+  }
+
+  /** draw.io's Save: sends the diagram to IDX's inbox. */
+  async function saveToIdx(xml) {
+    const ed = editor;
+    if (!ed) return;
+    const notSaved = () => post({ action: "status", message: "Not sent to IDX", modified: true });
+    // draw.io marks it saved as soon as Save is pressed; one send at a time, so put the mark back
+    if (ed.sending) {
+      post({ action: "status", message: "Still sending your last save: press Save again in a moment", modified: true });
+      return;
+    }
+    if (!snapshot.inbox) {
+      notSaved();
+      setNotice("Saving to IDX isn't switched on for this page. Download your copy and send it to your IDX contact.", { tone: "bad", actions: [{ label: "Download", onClick: downloadCurrent }] });
+      return;
+    }
+    if (new Blob([xml]).size > MAX_SAVE_BYTES) {
+      notSaved();
+      setNotice("This diagram is over 5 MB, usually because of pasted images. Make it smaller, or download it and send it to your IDX contact.", { tone: "bad", actions: [{ label: "Download", onClick: downloadCurrent }] });
+      return;
+    }
+    const details = await askSaveDetails();
+    if (editor !== ed) return;
+    if (!details) {
+      notSaved();
+      return;
+    }
+    ed.sending = true;
+    setStatus("Sending to IDX…");
+    try {
+      const saveId = crypto.randomUUID();
+      const savedAt = new Date();
+      const sealed = await seal({
+        v: 1,
+        saveId,
+        slug: slug(),
+        diagramId: ed.entry.id,
+        baseVersionId: ed.basis.baseVersionId,
+        parentSaveId: ed.basis.parentSaveId,
+        name: details.name,
+        message: details.message || null,
+        savedAt: savedAt.toISOString(),
+        xml,
+      });
+      await writeInboxSave(`${slug()}/${ed.entry.id}/${savedAt.getTime()}-${saveId}.json`, sealed);
+      // The next save builds on this one
+      ed.basis = { baseVersionId: ed.basis.baseVersionId, parentSaveId: saveId };
+      ed.savedXml = xml;
+      if (ed.latestXml === xml) {
+        setDirty(false);
+        keepDraft(true);
+        post({ action: "status", messageKey: "allChangesSaved", modified: false });
+      }
+      setStatus(`Sent to IDX ${fmtStamp(savedAt.toISOString())}. They'll see it within about 15 minutes.`);
+      setNotice("");
+    } catch (err) {
+      notSaved();
+      setStatus("Not sent to IDX");
+      setNotice(`Couldn't send your changes to IDX (${err instanceof Error ? err.message : "error"}). Try again, or download your copy and send it to your IDX contact.`, {
+        tone: "bad",
+        actions: [{ label: "Try again", onClick: () => saveToIdx(ed.latestXml) }, { label: "Download", onClick: downloadCurrent }],
+      });
+    } finally {
+      ed.sending = false;
+    }
+  }
+
+  async function closeDiagram(force = false) {
+    const ed = editor;
+    if (!ed) return;
+    if (!force && ed.sending) return;
+    if (!force && ed.dirty) {
+      const ok = await modal("Close without sending?", "Your changes haven't gone to IDX. They're kept in this browser and offered again when you next open the diagram.", [
+        { label: "Keep editing", value: false },
+        { label: "Close", value: true, primary: true },
+      ]);
+      if (!ok || editor !== ed) return;
+    }
+    if (ed.dirty) keepDraft(true);
+    clearTimeout(ed.loadTimer);
+    clearTimeout(ed.draftTimer);
+    ed.root.remove();
+    document.body.style.overflow = "";
+    editor = null;
+  }
+
+  window.addEventListener("message", (e) => {
+    const ed = editor;
+    if (!ed?.iframe || e.origin !== DRAWIO_ORIGIN || e.source !== ed.iframe.contentWindow || typeof e.data !== "string") return;
+    let message;
+    try { message = JSON.parse(e.data); } catch { return; }
+    switch (message.event) {
+      case "configure":
+        drawioConfig().then((config) => post({ action: "configure", config }));
+        break;
+      case "init":
+        // Once: a second init must never load over someone's edits
+        if (ed.started) return;
+        ed.started = true;
+        if (ed.draft) post({ action: "draft", xml: ed.draft.xml, name: ed.entry.name });
+        else loadXml(ed.startXml);
+        break;
+      case "draft":
+        if (message.result === "edit" && !message.error) {
+          ed.basis = ed.draft.basis;
+          loadXml(ed.draft.xml, true);
+          setDirty(true);
+        } else {
+          local.clear(draftKey(ed.entry.id));
+          loadXml(ed.startXml);
+        }
+        break;
+      case "load":
+        ed.ready = true;
+        ed.frameBox.querySelector(".message")?.remove();
+        break;
+      case "autosave":
+        if (typeof message.xml === "string") {
+          ed.latestXml = message.xml;
+          setDirty(message.xml !== ed.savedXml);
+          keepDraft();
+        }
+        break;
+      case "save":
+        if (typeof message.xml === "string") {
+          ed.latestXml = message.xml;
+          saveToIdx(message.xml);
+        }
+        break;
+    }
+  });
+
+  // Leaving with unsent edits or a save on its way asks first (the edits are kept as a draft either way)
+  window.addEventListener("beforeunload", (e) => {
+    if (!editor || (!editor.dirty && !editor.sending)) return;
+    if (editor.dirty) keepDraft(true);
+    e.preventDefault();
+  });
+
   // ─── Flow ───
   function show(snap) {
+    snapshot = snap;
     $("lock").hidden = true;
     $("status").hidden = true;
     $("lock-btn").hidden = false;
@@ -364,6 +907,9 @@
   }
 
   function showLock(message) {
+    closeDiagram(true);
+    pageKey = null;
+    snapshot = null;
     $("status").hidden = true;
     $("app").hidden = true;
     $("lock-btn").hidden = true;
@@ -380,7 +926,7 @@
     $("unlock-btn").disabled = true;
     $("unlock-btn").textContent = "Unlocking…";
     try {
-      const snap = await decrypt(password);
+      const snap = await unlock(password);
       if ($("remember").checked) store.set(password);
       show(snap);
     } catch {
@@ -395,7 +941,8 @@
 
   (async () => {
     try {
-      const res = await fetch("data.json", { cache: "no-store" });
+      // The query string gets past GitHub Pages' cache, so a new version shows straight away
+      const res = await fetch(`data.json?t=${Date.now()}`, { cache: "no-store" });
       if (!res.ok) throw new Error(String(res.status));
       envelope = await res.json();
     } catch {
@@ -408,7 +955,7 @@
     }
     const saved = store.get();
     if (saved) {
-      try { show(await decrypt(saved)); return; } catch { store.clear(); }
+      try { show(await unlock(saved)); return; } catch { store.clear(); }
     }
     showLock();
   })();
